@@ -89,7 +89,6 @@ export default function UploadPage() {
     setGlobalError('');
     setSuccessCount(0);
 
-    // Upload sequentially so progress bar feels real
     let successes = 0;
     for (const item of uploadItems) {
       setUploadItems(prev => prev.map(p => p.id === item.id ? { ...p, uploading: true } : p));
@@ -135,6 +134,30 @@ export default function UploadPage() {
   const failedCount = uploadItems.filter(i => i.error).length;
   const progress = uploadItems.length > 0 ? (successCount / uploadItems.length) * 100 : 0;
 
+  // Hidden inputs — defined once, used via <label htmlFor> everywhere (mobile-safe)
+  const hiddenInputs = (
+    <>
+      <input
+        id="gallery-input"
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept="image/*"
+        onChange={handleFileSelect}
+        className="hidden"
+      />
+      <input
+        id="camera-input"
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={handleFileSelect}
+        className="hidden"
+      />
+    </>
+  );
+
   // Empty state
   if (uploadItems.length === 0) {
     return (
@@ -145,9 +168,9 @@ export default function UploadPage() {
         </div>
 
         {/* Primary action — gallery */}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="flex-1 min-h-[200px] flex flex-col items-center justify-center gap-4 rounded-3xl border-2 border-dashed border-primary/40 bg-primary/5 active:bg-primary/10 transition-colors"
+        <label
+          htmlFor="gallery-input"
+          className="flex-1 min-h-[200px] flex flex-col items-center justify-center gap-4 rounded-3xl border-2 border-dashed border-primary/40 bg-primary/5 active:bg-primary/10 transition-colors cursor-pointer"
         >
           <div className="w-16 h-16 rounded-2xl bg-primary flex items-center justify-center shadow-lg">
             <FolderOpen className="w-8 h-8 text-primary-foreground" />
@@ -156,16 +179,16 @@ export default function UploadPage() {
             <p className="font-semibold text-foreground">Choose from Gallery</p>
             <p className="text-sm text-muted-foreground mt-0.5">Select one or multiple images</p>
           </div>
-        </button>
+        </label>
 
-        {/* Tiny camera option */}
-        <button
-          onClick={() => cameraInputRef.current?.click()}
-          className="flex items-center justify-center gap-2 rounded-xl border border-border bg-background py-2.5 px-4 active:bg-muted transition-colors text-muted-foreground"
+        {/* Camera option */}
+        <label
+          htmlFor="camera-input"
+          className="flex items-center justify-center gap-2 rounded-xl border border-border bg-background py-2.5 px-4 active:bg-muted transition-colors text-muted-foreground cursor-pointer"
         >
           <Camera className="w-4 h-4" />
           <span className="text-xs font-medium">Take a photo instead</span>
-        </button>
+        </label>
 
         {/* Guidelines */}
         <div className="rounded-2xl bg-muted p-4 text-sm space-y-2 text-muted-foreground">
@@ -175,8 +198,7 @@ export default function UploadPage() {
           <p>🔢 Name, phone and address must be readable</p>
         </div>
 
-        <input ref={fileInputRef} type="file" multiple accept="image/*" onChange={handleFileSelect} className="hidden" />
-        <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="hidden" />
+        {hiddenInputs}
       </div>
     );
   }
@@ -200,7 +222,7 @@ export default function UploadPage() {
   return (
     <div className="flex flex-col min-h-[calc(100vh-56px)]">
 
-      {/* Image viewer — fills most of screen */}
+      {/* Image viewer */}
       <div className="relative flex-1 bg-black min-h-[55vw] max-h-[60vh]">
         {currentItem?.previewUrl ? (
           <img
@@ -219,15 +241,12 @@ export default function UploadPage() {
           <span className="text-white text-sm font-semibold">
             {currentIndex + 1} / {uploadItems.length}
           </span>
-          <div className="flex gap-2">
-            <button
-              onClick={() => { fileInputRef.current?.click(); }}
-              className="bg-white/20 backdrop-blur-sm text-white rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
-            >
-              <FolderOpen className="w-3.5 h-3.5" /> Add
-            </button>
-
-          </div>
+          <label
+            htmlFor="gallery-input"
+            className="bg-white/20 backdrop-blur-sm text-white rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+          >
+            <FolderOpen className="w-3.5 h-3.5" /> Add
+          </label>
         </div>
 
         {/* Nav arrows */}
@@ -250,7 +269,7 @@ export default function UploadPage() {
           </>
         )}
 
-        {/* Status badge on image */}
+        {/* Status overlays */}
         {currentItem?.uploading && (
           <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
             <div className="bg-white rounded-2xl px-4 py-3 flex items-center gap-2">
@@ -314,7 +333,6 @@ export default function UploadPage() {
       {/* Bottom panel */}
       <div className="bg-background border-t border-border p-4 space-y-3">
 
-        {/* Progress */}
         {loading && (
           <div className="space-y-1.5">
             <div className="flex justify-between text-xs text-muted-foreground">
@@ -325,7 +343,6 @@ export default function UploadPage() {
           </div>
         )}
 
-        {/* Error */}
         {globalError && (
           <Alert variant="destructive" className="py-2">
             <AlertCircle className="h-4 w-4" />
@@ -333,7 +350,6 @@ export default function UploadPage() {
           </Alert>
         )}
 
-        {/* Stats row */}
         <div className="flex items-center justify-between text-sm">
           <div className="flex items-center gap-3">
             <span className="font-medium">{uploadItems.length} image{uploadItems.length !== 1 ? 's' : ''}</span>
@@ -351,7 +367,6 @@ export default function UploadPage() {
           </button>
         </div>
 
-        {/* Action buttons */}
         {failedCount > 0 && !loading ? (
           <div className="flex gap-2">
             <Button onClick={retryFailed} variant="outline" className="flex-1 rounded-xl h-12 gap-2">
@@ -382,8 +397,7 @@ export default function UploadPage() {
         )}
       </div>
 
-      <input ref={fileInputRef} type="file" multiple accept="image/*" onChange={handleFileSelect} className="hidden" />
-      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="hidden" />
+      {hiddenInputs}
     </div>
   );
 }

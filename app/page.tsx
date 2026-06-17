@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { Image } from "../types";
 import NextImage from "next/image";
 import {
@@ -87,6 +87,70 @@ const stepConfig = {
   },
 };
 
+// Cache key for localStorage
+const CACHE_KEY = 'package_search_cache';
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+// Image component with priority loading
+const OptimizedImage = ({ 
+  image, 
+  onError, 
+  onClick,
+  priority = false
+}: { 
+  image: Image; 
+  onError: (url: string) => void; 
+  onClick: () => void;
+  priority?: boolean;
+}) => {
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [error, setError] = useState(false);
+
+  return (
+    <div
+      onClick={onClick}
+      className="group relative aspect-[3/4] bg-white rounded-xl overflow-hidden cursor-pointer shadow-sm hover:shadow-md transition-shadow"
+    >
+      {!isLoaded && !error && (
+        <div className="absolute inset-0 bg-gradient-to-r from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-700 animate-pulse" />
+      )}
+      
+      {error ? (
+        <div className="w-full h-full flex items-center justify-center bg-gray-100 dark:bg-gray-800">
+          <IconPackage className="w-8 h-8 text-gray-300 dark:text-gray-600" />
+        </div>
+      ) : (
+        <NextImage
+          width={200}
+          height={267}
+          src={image.url}
+          alt={image.title || "Package label"}
+          className={`w-full h-full object-cover group-hover:scale-105 transition-transform duration-200 ${
+            isLoaded ? 'opacity-100' : 'opacity-0'
+          }`}
+          onLoadingComplete={() => setIsLoaded(true)}
+          onError={() => {
+            setError(true);
+            onError(image.url);
+          }}
+          loading={priority ? "eager" : "lazy"}
+          priority={priority}
+          quality={75}
+          sizes="(max-width: 768px) 50vw, 33vw"
+          placeholder="blur"
+          blurDataURL="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCwAA8A/9k="
+        />
+      )}
+      
+      {(image as any).extractedData?.name && (
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 pt-6">
+          <p className="text-white text-xs font-semibold truncate">{(image as any).extractedData.name}</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export default function HomePage() {
   const [images, setImages] = useState<Image[]>([]);
   const [pagination, setPagination] = useState<Pagination | null>(null);
@@ -107,73 +171,170 @@ export default function HomePage() {
   const [inputValue, setInputValue] = useState("");
   const [hasSearched, setHasSearched] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const cacheRef = useRef<Map<string, { data: any; timestamp: number }>>(new Map());
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const currentStepConfig = stepConfig[searchState.step as keyof typeof stepConfig] ?? stepConfig.phone;
 
   useEffect(() => {
-    if (inputRef.current) inputRef.current.focus();
+    if (inputRef.current) {
+      // Slight delay to ensure DOM is ready
+      setTimeout(() => inputRef.current?.focus(), 100);
+    }
   }, [searchState.step]);
 
   useEffect(() => {
-    if (hasSearched) fetchImages();
+    if (hasSearched && searchState.currentQuery) {
+      fetchImages();
+    }
   }, [currentPage]);
 
-  const fetchImages = async (query?: string) => {
+  // Cancel previous requests
+  const cancelPreviousRequest = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  }, []);
+
+  // Check cache
+  const getCachedData = useCallback((key: string) => {
+    const cached = cacheRef.current.get(key);
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+      return cached.data;
+    }
+    cacheRef.current.delete(key);
+    return null;
+  }, []);
+
+  const fetchImages = useCallback(async (query?: string) => {
     const q = query ?? searchState.currentQuery;
     if (!q.trim()) return;
+
+    cancelPreviousRequest();
+    
+    const cacheKey = `${q}-page-${currentPage}`;
+    const cachedData = getCachedData(cacheKey);
+    
+    if (cachedData) {
+      setImages(cachedData.images);
+      setPagination(cachedData.pagination);
+      setImageErrors(new Set());
+      return;
+    }
+
     setLoading(true);
+    abortControllerRef.current = new AbortController();
+
     try {
       const params = new URLSearchParams({
         page: currentPage.toString(),
         limit: "12",
         search: q.trim(),
       });
-      const response = await fetch(`/api/public/images?${params}`);
+      
+      const response = await fetch(`/api/public/images?${params}`, {
+        signal: abortControllerRef.current.signal,
+        // Add cache control
+        headers: {
+          'Cache-Control': 'no-cache',
+        },
+      });
+      
       const data = await response.json();
+      
       if (data.success) {
-        setImages(data.data.images);
-        setPagination(data.data.pagination);
+        const result = {
+          images: data.data.images,
+          pagination: data.data.pagination,
+        };
+        
+        // Cache the result
+        cacheRef.current.set(cacheKey, {
+          data: result,
+          timestamp: Date.now(),
+        });
+        
+        setImages(result.images);
+        setPagination(result.pagination);
         setImageErrors(new Set());
       }
-    } catch (error) {
-      console.error("Failed to fetch images:", error);
+    } catch (error: any) {
+      if (error.name !== 'AbortError') {
+        console.error("Failed to fetch images:", error);
+      }
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
     }
-  };
+  }, [currentPage, searchState.currentQuery, cancelPreviousRequest, getCachedData]);
 
-  const nextStep = (): SearchStep | null => {
-    const order: SearchStep[] = ["phone", "name", "address"];
-    const currentIdx = order.indexOf(searchState.step as any);
-    for (let i = currentIdx + 1; i < order.length; i++) {
-      if (!searchState.noResultsFor.includes(order[i])) return order[i];
-    }
-    return null;
-  };
+  // Debounced search
+  const debouncedSearch = useCallback(
+    debounce((value: string) => {
+      if (value.trim()) {
+        handleSearch(value);
+      }
+    }, 300),
+    []
+  );
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputValue.trim()) return;
+  const handleSearch = useCallback(async (query: string) => {
+    if (!query.trim()) return;
 
     const step = searchState.step as "phone" | "name" | "address";
-    const newState = { ...searchState, [step]: inputValue.trim(), currentQuery: inputValue.trim() };
+    const newState = { 
+      ...searchState, 
+      [step]: query.trim(), 
+      currentQuery: query.trim() 
+    };
     setSearchState(newState);
     setCurrentPage(1);
     setHasSearched(true);
     setLoading(true);
 
+    cancelPreviousRequest();
+    const cacheKey = `${query.trim()}-page-1`;
+    const cachedData = getCachedData(cacheKey);
+
+    if (cachedData) {
+      setImages(cachedData.images);
+      setPagination(cachedData.pagination);
+      setImageErrors(new Set());
+      setSearchState({ ...newState, step: "results" });
+      setLoading(false);
+      return;
+    }
+
     try {
-      const params = new URLSearchParams({ page: "1", limit: "12", search: inputValue.trim() });
-      const response = await fetch(`/api/public/images?${params}`);
+      const params = new URLSearchParams({
+        page: "1",
+        limit: "12",
+        search: query.trim(),
+      });
+      
+      abortControllerRef.current = new AbortController();
+      const response = await fetch(`/api/public/images?${params}`, {
+        signal: abortControllerRef.current.signal,
+      });
       const data = await response.json();
 
       if (data.success && data.data.images.length > 0) {
-        setImages(data.data.images);
-        setPagination(data.data.pagination);
+        const result = {
+          images: data.data.images,
+          pagination: data.data.pagination,
+        };
+        
+        cacheRef.current.set(cacheKey, {
+          data: result,
+          timestamp: Date.now(),
+        });
+        
+        setImages(result.images);
+        setPagination(result.pagination);
         setImageErrors(new Set());
         setSearchState({ ...newState, step: "results" });
       } else {
-        // No results — try next field
         setImages([]);
         setPagination(null);
         const updatedNoResults = [...newState.noResultsFor, step];
@@ -185,12 +346,15 @@ export default function HomePage() {
           setSearchState({ ...newState, step: "results", noResultsFor: updatedNoResults });
         }
       }
-    } catch (error) {
-      console.error("Search failed:", error);
+    } catch (error: any) {
+      if (error.name !== 'AbortError') {
+        console.error("Search failed:", error);
+      }
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
     }
-  };
+  }, [searchState, cancelPreviousRequest, getCachedData]);
 
   const getNextStep = (
     current: "phone" | "name" | "address",
@@ -204,43 +368,76 @@ export default function HomePage() {
     return null;
   };
 
-  const resetSearch = () => {
-    setSearchState({ step: "phone", phone: "", name: "", address: "", currentQuery: "", noResultsFor: [] });
+  const handleSubmit = useCallback((e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputValue.trim()) return;
+    debouncedSearch(inputValue.trim());
+  }, [inputValue, debouncedSearch]);
+
+  const resetSearch = useCallback(() => {
+    cancelPreviousRequest();
+    setSearchState({ 
+      step: "phone", 
+      phone: "", 
+      name: "", 
+      address: "", 
+      currentQuery: "", 
+      noResultsFor: [] 
+    });
     setInputValue("");
     setImages([]);
     setPagination(null);
     setHasSearched(false);
     setCurrentPage(1);
-  };
+    cacheRef.current.clear(); // Clear cache on reset
+  }, [cancelPreviousRequest]);
 
-  const trySavedValue = (step: "phone" | "name" | "address") => {
+  const trySavedValue = useCallback((step: "phone" | "name" | "address") => {
     const val = searchState[step];
     if (!val) return;
     setSearchState({ ...searchState, step, currentQuery: val });
     setInputValue(val);
-    fetchImages(val);
-  };
+    handleSearch(val);
+  }, [searchState, handleSearch]);
 
-  const handleImageError = (url: string) => setImageErrors((prev) => new Set(prev.add(url)));
-  const handleImageClick = (image: Image) => { setSelectedImage(image); setShowPopup(true); };
-  const closePopup = () => { setShowPopup(false); setSelectedImage(null); };
+  const handleImageError = useCallback((url: string) => {
+    setImageErrors((prev) => new Set(prev.add(url)));
+  }, []);
 
-  const handleShare = async () => {
+  const handleImageClick = useCallback((image: Image) => {
+    setSelectedImage(image);
+    setShowPopup(true);
+  }, []);
+
+  const closePopup = useCallback(() => {
+    setShowPopup(false);
+    setSelectedImage(null);
+  }, []);
+
+  const handleShare = useCallback(async () => {
     if (!selectedImage) return;
     try {
       if (navigator.share) {
-        await navigator.share({ title: selectedImage.title || "Document Image", text: "Check out this document", url: selectedImage.url });
+        await navigator.share({ 
+          title: selectedImage.title || "Document Image", 
+          text: "Check out this document", 
+          url: selectedImage.url 
+        });
       } else {
         await navigator.clipboard.writeText(selectedImage.url);
         alert("Image URL copied to clipboard!");
       }
     } catch {}
-  };
+  }, [selectedImage]);
 
-  const openTrackingSite = (url: string) => window.open(url, "_blank");
+  const openTrackingSite = useCallback((url: string) => {
+    window.open(url, "_blank");
+  }, []);
 
-  const completedSteps = (["phone", "name", "address"] as const).filter(
-    (s) => searchState[s] && s !== searchState.step
+  const completedSteps = useMemo(() => 
+    (["phone", "name", "address"] as const).filter(
+      (s) => searchState[s] && s !== searchState.step
+    ), [searchState]
   );
 
   const isSearching = searchState.step !== "results";
@@ -329,14 +526,24 @@ export default function HomePage() {
                     placeholder={currentStepConfig.placeholder}
                     className="w-full px-4 py-3 bg-transparent text-sm font-medium placeholder:text-muted-foreground focus:outline-none pr-24 rounded-xl"
                     autoComplete="off"
+                    autoFocus
                   />
                   <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
                     {inputValue && (
-                      <button type="button" onClick={() => setInputValue("")} className="p-1.5 text-muted-foreground hover:text-foreground">
+                      <button 
+                        type="button" 
+                        onClick={() => setInputValue("")} 
+                        className="p-1.5 text-muted-foreground hover:text-foreground"
+                      >
                         <IconX className="w-3.5 h-3.5" />
                       </button>
                     )}
-                    <Button type="submit" size="sm" disabled={!inputValue.trim() || loading} className="rounded-lg text-xs h-8">
+                    <Button 
+                      type="submit" 
+                      size="sm" 
+                      disabled={!inputValue.trim() || loading} 
+                      className="rounded-lg text-xs h-8"
+                    >
                       {loading ? "…" : "Search"}
                     </Button>
                   </div>
@@ -348,7 +555,10 @@ export default function HomePage() {
                     type="button"
                     onClick={() => {
                       const next = getNextStep(searchState.step as any, [...searchState.noResultsFor, searchState.step as any]);
-                      if (next) { setSearchState({ ...searchState, step: next, noResultsFor: [...searchState.noResultsFor, searchState.step as any] }); setInputValue(""); }
+                      if (next) { 
+                        setSearchState({ ...searchState, step: next, noResultsFor: [...searchState.noResultsFor, searchState.step as any] }); 
+                        setInputValue(""); 
+                      }
                       else setSearchState({ ...searchState, step: "results" });
                     }}
                     className="mt-2 text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 w-full text-center"
@@ -378,11 +588,15 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Loading skeleton */}
+        {/* Loading skeleton with priority images */}
         {loading && (
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="aspect-[3/4] bg-gray-200 dark:bg-gray-800 rounded-xl animate-pulse" />
+              <div 
+                key={i} 
+                className="aspect-[3/4] bg-gray-200 dark:bg-gray-800 rounded-xl animate-pulse"
+                style={{ animationDelay: `${i * 50}ms` }}
+              />
             ))}
           </div>
         )}
@@ -391,33 +605,14 @@ export default function HomePage() {
         {!loading && images.length > 0 && (
           <>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-              {images.map((image) => (
-                <div
+              {images.map((image, index) => (
+                <OptimizedImage
                   key={image._id}
+                  image={image}
+                  onError={handleImageError}
                   onClick={() => handleImageClick(image)}
-                  className="group relative aspect-[3/4] bg-white rounded-xl overflow-hidden cursor-pointer shadow-sm hover:shadow-md transition-shadow"
-                >
-                  {imageErrors.has(image.url) ? (
-                    <div className="w-full h-full flex items-center justify-center bg-gray-100">
-                      <IconPackage className="w-8 h-8 text-gray-300" />
-                    </div>
-                  ) : (
-                    <NextImage
-                      width={200} height={267}
-                      src={image.url}
-                      alt={image.title || "Package label"}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                      onError={() => handleImageError(image.url)}
-                      loading="lazy"
-                    />
-                  )}
-                  {/* Name chip */}
-                  {(image as any).extractedData?.name && (
-                    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 pt-6">
-                      <p className="text-white text-xs font-semibold truncate">{(image as any).extractedData.name}</p>
-                    </div>
-                  )}
-                </div>
+                  priority={index < 3} // Load first 3 images with priority
+                />
               ))}
             </div>
 
@@ -432,15 +627,31 @@ export default function HomePage() {
 
             {pagination && pagination.pages > 1 && (
               <div className="flex justify-center items-center gap-2 mt-6">
-                <button onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-2 rounded-md border disabled:opacity-30 hover:bg-gray-50">
+                <button 
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} 
+                  disabled={currentPage === 1} 
+                  className="p-2 rounded-md border disabled:opacity-30 hover:bg-gray-50"
+                >
                   <IconArrowLeft className="w-4 h-4" />
                 </button>
                 {Array.from({ length: Math.min(5, pagination.pages) }, (_, i) => i + 1).map((page) => (
-                  <button key={page} onClick={() => setCurrentPage(page)} className={`w-8 h-8 rounded-md text-sm ${currentPage === page ? "bg-gray-900 text-white" : "border hover:bg-gray-50"}`}>
+                  <button 
+                    key={page} 
+                    onClick={() => setCurrentPage(page)} 
+                    className={`w-8 h-8 rounded-md text-sm ${
+                      currentPage === page 
+                        ? "bg-gray-900 text-white" 
+                        : "border hover:bg-gray-50"
+                    }`}
+                  >
                     {page}
                   </button>
                 ))}
-                <button onClick={() => setCurrentPage((p) => Math.min(pagination.pages, p + 1))} disabled={currentPage === pagination.pages} className="p-2 rounded-md border disabled:opacity-30 hover:bg-gray-50">
+                <button 
+                  onClick={() => setCurrentPage((p) => Math.min(pagination.pages, p + 1))} 
+                  disabled={currentPage === pagination.pages} 
+                  className="p-2 rounded-md border disabled:opacity-30 hover:bg-gray-50"
+                >
                   <IconArrowRight className="w-4 h-4" />
                 </button>
               </div>
@@ -475,9 +686,20 @@ export default function HomePage() {
             <h2 className="text-base font-bold tracking-tight mb-3 text-center">Tracking sites</h2>
             <div className="grid grid-cols-2 gap-3 mb-4">
               {trackingSites.map((site, i) => (
-                <div key={i} onClick={() => openTrackingSite(site.url)} className="bg-background flex flex-col items-center rounded-xl p-4 cursor-pointer hover:shadow-md transition-all group hover:scale-105 border border-border">
+                <div 
+                  key={i} 
+                  onClick={() => openTrackingSite(site.url)} 
+                  className="bg-background flex flex-col items-center rounded-xl p-4 cursor-pointer hover:shadow-md transition-all group hover:scale-105 border border-border"
+                >
                   <div className="relative w-20 h-20 mb-2">
-                    <NextImage src={`/${site.logo}`} alt={site.name} width={80} height={80} className="object-contain w-full h-full rounded-md" />
+                    <NextImage 
+                      src={`/${site.logo}`} 
+                      alt={site.name} 
+                      width={80} 
+                      height={80} 
+                      className="object-contain w-full h-full rounded-md" 
+                      loading="lazy"
+                    />
                     <IconExternalLink className={`absolute -top-1 -right-1 w-4 h-4 ${site.textColor} opacity-0 group-hover:opacity-100 transition-opacity bg-white rounded-full p-0.5 border`} />
                   </div>
                   <p className="text-xs font-medium text-center text-muted-foreground">{site.name}</p>
@@ -518,11 +740,14 @@ export default function HomePage() {
               ) : (
                 <div className="relative w-full">
                   <NextImage
-                    width={800} height={600}
+                    width={800}
+                    height={600}
                     src={selectedImage.url}
                     alt={selectedImage.title || "Package label"}
                     className="w-full object-contain max-h-[80vh]"
                     onError={() => handleImageError(selectedImage.url)}
+                    priority
+                    quality={90}
                   />
                   <div className="absolute bottom-3 right-3">
                     <Button onClick={handleShare} size="sm" className="bg-black/50 rounded-full hover:bg-black/70 backdrop-blur-sm text-white border-0 gap-1.5">
@@ -537,4 +762,24 @@ export default function HomePage() {
       )}
     </div>
   );
+}
+
+// Debounce utility
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): (...args: Parameters<T>) => void {
+  let timeout: NodeJS.Timeout | null = null;
+  
+  return function executedFunction(...args: Parameters<T>) {
+    const later = () => {
+      timeout = null;
+      func(...args);
+    };
+    
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    timeout = setTimeout(later, wait);
+  };
 }
